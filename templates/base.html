@@ -45,12 +45,16 @@
       // show loader on any form submission, disable submit button
       document.addEventListener('DOMContentLoaded', function(){
         document.querySelectorAll('form').forEach(function(f){
-          f.addEventListener('submit', function(e){
-            var btn = f.querySelector('button[type=submit]');
-            if(btn) btn.disabled = true;
-            document.getElementById('loader-overlay').style.display = 'block';
+            f.addEventListener('submit', function(e){
+              // If form has data-skip-loader="true", don't show the global overlay
+              if (f.dataset && f.dataset.skipLoader === 'true') {
+                return true;
+              }
+              var btn = f.querySelector('button[type=submit]');
+              if(btn) btn.disabled = true;
+              document.getElementById('loader-overlay').style.display = 'block';
+            });
           });
-        });
       });
     </script>
   </body>

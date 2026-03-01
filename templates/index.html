@@ -19,20 +19,20 @@
         <h2>Export by Date Range</h2>
         <span class="modal-close" id="modal-close">&times;</span>
       </div>
-      <form method="get" action="{{ url_for('export') }}" id="export-form">
+      <form method="get" action="{{ url_for('export') }}" id="export-form" data-skip-loader="true">
         <div class="modal-body">
           <div class="form-group">
-            <label for="start-date">Start Date</label>
+            <label for="start-date">Start Date (Optional)</label>
             <input type="date" id="start-date" name="start" class="date-input" placeholder="dd/mm/yyyy">
           </div>
           <div class="form-group">
-            <label for="end-date">End Date</label>
+            <label for="end-date">End Date (Optional)</label>
             <input type="date" id="end-date" name="end" class="date-input" placeholder="dd/mm/yyyy">
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-cancel" id="modal-cancel">Cancel</button>
-          <button type="submit" class="btn btn-submit">Export</button>
+          <button type="submit" class="btn btn-submit">Export CSV</button>
         </div>
       </form>
     </div>
@@ -67,22 +67,24 @@
         }
       });
 
-      // Form submission
+      // Form submission with validation
       form.addEventListener('submit', function(e){
-        if (!startInput.value || !endInput.value) {
-          e.preventDefault();
-          alert('Please select both start and end dates');
-        } else if (startInput.value > endInput.value) {
-          e.preventDefault();
-          alert('Start date must be before end date');
-        } else {
-          // Close modal after a short delay to allow form submission
-          setTimeout(closeModal, 500);
+        // If both dates are filled, validate them
+        if (startInput.value && endInput.value) {
+          if (startInput.value > endInput.value) {
+            e.preventDefault();
+            alert('Start date must be before end date');
+            return false;
+          }
         }
+        // Close modal after a short delay to allow the download to start
+        setTimeout(function(){
+          closeModal();
+        }, 600);
       });
     });
   </script>
-  
+
   {% if receipts %}
     <table>
       <thead><tr><th>#</th><th>Date</th><th>Total</th><th>Category</th><th>Filename</th><th>Uploaded</th><th>View</th></tr></thead>

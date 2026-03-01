@@ -405,59 +405,67 @@ def export():
     user = current_user()
     if not user:
         return redirect(url_for("login"))
-    start = request.args.get("start")
-    end = request.args.get("end")
-    q = Receipt.query.filter_by(user_id=user.id)
-    if start:
-        try:
-            dt = datetime.fromisoformat(start)
-            q = q.filter(Receipt.created_at >= dt)
-        except ValueError:
-            pass
-    if end:
-        try:
-            dt = datetime.fromisoformat(end)
-            # If the end value was supplied as a date (YYYY-MM-DD) from a date picker,
-            # adjust to the end of that day so receipts on that date are included.
-            if isinstance(end, str) and len(end) <= 10:
-                dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-            q = q.filter(Receipt.created_at <= dt)
-        except ValueError:
-            pass
-    items = q.order_by(Receipt.created_at.desc()).all()
+    
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        q = Receipt.query.filter_by(user_id=user.id)
+        if start:
+            try:
+                dt = datetime.fromisoformat(start)
+                q = q.filter(Receipt.created_at >= dt)
+            except ValueError:
+                pass
+        if end:
+            try:
+                dt = datetime.fromisoformat(end)
+                # If the end value was supplied as a date (YYYY-MM-DD) from a date picker,
+                # adjust to the end of that day so receipts on that date are included.
+                if isinstance(end, str) and len(end) <= 10:
+                    dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+                q = q.filter(Receipt.created_at <= dt)
+            except ValueError:
+                pass
+        items = q.order_by(Receipt.created_at.desc()).all()
 
-    def parse_amount(s: str) -> float:
-        if not s:
-            return 0.0
-        s = s.strip()
-        # keep digits, dot, comma and minus
-        s = re.sub(r"[^0-9,\.\-]", "", s)
-        # If there are commas but no dots, treat comma as decimal separator (e.g. "12,34")
-        if s.count(',') > 0 and s.count('.') == 0:
-            if s.count(',') > 1:
-                s = s.replace(',', '')
+        def parse_amount(s: str) -> float:
+            if not s:
+                return 0.0
+            s = s.strip()
+            # keep digits, dot, comma and minus
+            s = re.sub(r"[^0-9,\.\-]", "", s)
+            # If there are commas but no dots, treat comma as decimal separator (e.g. "12,34")
+            if s.count(',') > 0 and s.count('.') == 0:
+                if s.count(',') > 1:
+                    s = s.replace(',', '')
+                else:
+                    s = s.replace(',', '.')
             else:
-                s = s.replace(',', '.')
-        else:
-            s = s.replace(',', '')
-        try:
-            return float(s)
-        except Exception:
-            return 0.0
+                s = s.replace(',', '')
+            try:
+                return float(s)
+            except Exception:
+                return 0.0
 
-    total_sum = sum(parse_amount(r.total) for r in items)
+        total_sum = sum(parse_amount(r.total) for r in items)
 
-    def stream_csv():
-        header = ",".join(["id", "date", "total", "bill_category", "filename", "created_at"]) + "\n"
-        yield header
-        for r in items:
-            row = [str(r.id), (r.date or ""), (r.total or ""), (r.bill_category or ""), (r.filename or ""), r.created_at.isoformat()]
-            yield ",".join([v.replace(",", " ") for v in row]) + "\n"
-        # Append a final total row summing all receipt totals
-        total_row = ["", "", f"{total_sum:.2f}", "TOTAL", "", ""]
-        yield ",".join([v.replace(",", " ") for v in total_row]) + "\n"
+        def stream_csv():
+            header = ",".join(["id", "date", "total", "bill_category", "filename", "created_at"]) + "\n"
+            yield header
+            for r in items:
+                row = [str(r.id), (r.date or ""), (r.total or ""), (r.bill_category or ""), (r.filename or ""), r.created_at.isoformat()]
+                yield ",".join([v.replace(",", " ") for v in row]) + "\n"
+            # Append a final total row summing all receipt totals
+            total_row = ["", "", f"{total_sum:.2f}", "TOTAL", "", ""]
+            yield ",".join([v.replace(",", " ") for v in total_row]) + "\n"
 
-    return Response(stream_csv(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=receipts.csv"})
+        response = Response(stream_csv(), mimetype="text/csv")
+        response.headers["Content-Disposition"] = "attachment; filename=receipts.csv"
+        return response
+    
+    except Exception as e:
+        flash(f"Export error: {str(e)}", "error")
+        return redirect(url_for("index"))
 
 
 @app.route('/reprocess', methods=['POST'])
