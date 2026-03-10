@@ -148,6 +148,32 @@ For persistence on the free tier, use a managed database (Render Postgres has a 
 
 ---
 
+## Local OCR Sync (Option 4)
+
+If you use the free Render plan, EasyOCR can exceed the 512MB limit. You can keep the web app on Render and run OCR locally, then sync results back to the server.
+
+### 1) Configure Render
+Set these environment variables in Render:
+```
+OCR_ENABLED=0
+OCR_SYNC_TOKEN=your-long-random-token
+```
+
+### 2) Run local OCR and sync
+From your local machine (where EasyOCR runs):
+```bash
+python sync_ocr_local.py --url https://sensebill.onrender.com --token your-long-random-token --username YOUR_USERNAME --file "path/to/receipt.jpg"
+```
+
+You can also process a folder:
+```bash
+python sync_ocr_local.py --url https://sensebill.onrender.com --token your-long-random-token --username YOUR_USERNAME --dir "path/to/receipts/"
+```
+
+The script will run OCR locally and update the matching receipt on the server by filename.
+
+---
+
 ## How It Works - Step by Step
 
 ### 1. **User Registration**

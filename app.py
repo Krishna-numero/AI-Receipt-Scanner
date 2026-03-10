@@ -16,6 +16,7 @@ from flask import (
     flash,
     send_from_directory,
     Response,
+    jsonify,
 )
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -51,6 +52,7 @@ db = SQLAlchemy(app)
 OCR_ENABLED = os.environ.get("OCR_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 EASYOCR_OK = EASYOCR_AVAILABLE and OCR_ENABLED
 EASYOCR_ERR = "EasyOCR not installed" if not EASYOCR_OK else ""
+OCR_SYNC_TOKEN = os.environ.get("OCR_SYNC_TOKEN")
 
 
 class User(db.Model):
@@ -106,6 +108,18 @@ def current_user():
     if not uid:
         return None
     return User.query.get(uid)
+
+
+def _check_sync_token(req):
+    if not OCR_SYNC_TOKEN:
+        return False
+    auth = req.headers.get("Authorization", "")
+    token = ""
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = req.headers.get("X-OCR-Token", "").strip()
+    return bool(token) and token == OCR_SYNC_TOKEN
 
 
 # helpers
@@ -637,6 +651,53 @@ def export():
     except Exception as e:
         flash(f"Export error: {str(e)}", "error")
         return redirect(url_for("index"))
+
+
+@app.route("/api/ocr_sync", methods=["POST"])
+def ocr_sync():
+    if not _check_sync_token(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    receipt_id = data.get("receipt_id")
+    original_filename = (data.get("original_filename") or data.get("filename") or "").strip()
+
+    user = None
+    if username:
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            return jsonify({"ok": False, "error": "user_not_found"}), 404
+
+    if receipt_id:
+        r = Receipt.query.get(receipt_id)
+        if not r:
+            return jsonify({"ok": False, "error": "receipt_not_found"}), 404
+        if user and r.user_id != user.id:
+            return jsonify({"ok": False, "error": "forbidden"}), 403
+    else:
+        if not user:
+            return jsonify({"ok": False, "error": "username_required"}), 400
+        if not original_filename:
+            return jsonify({"ok": False, "error": "original_filename_required"}), 400
+        r = (Receipt.query
+             .filter_by(user_id=user.id, original_filename=original_filename)
+             .order_by(Receipt.created_at.desc())
+             .first())
+        if not r:
+            r = (Receipt.query
+                 .filter_by(user_id=user.id, filename=original_filename)
+                 .order_by(Receipt.created_at.desc())
+                 .first())
+        if not r:
+            return jsonify({"ok": False, "error": "receipt_not_found"}), 404
+
+    # Update fields if provided
+    for key in ("date", "total", "bill_category", "raw_text"):
+        if key in data:
+            setattr(r, key, data.get(key))
+    db.session.commit()
+    return jsonify({"ok": True, "receipt_id": r.id})
 
 
 @app.route('/reprocess', methods=['POST'])
