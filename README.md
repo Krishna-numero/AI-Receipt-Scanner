@@ -122,6 +122,32 @@ You'll see the login page. If you don't have an account, click "Register" to cre
 
 ---
 
+## Deploying on Render (Free Tier)
+
+Render supports free web services and free Postgres databases, which are suitable for demos and hobby projects. citeturn1search5
+
+### 1. Create a Render Web Service
+In the Render Dashboard:
+1. Click **New** → **Web Service**
+2. Connect your GitHub repo
+3. Use these settings:
+   - **Language**: Python 3
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `gunicorn app:app` citeturn1search0
+
+### 2. Set Environment Variables
+Set `SECRET_KEY` in the Render Dashboard (Environment tab). Render recommends using environment variables for secrets. citeturn1search2
+
+### 3. Storage and Database Notes (Important)
+Free Render web services do **not** include persistent disks, and the filesystem is ephemeral. citeturn1search5turn1search7  
+That means:
+- SQLite data (`receipts.db`) will be lost on restarts.
+- Uploaded files in `uploads/` will be lost on restarts.
+
+For persistence on the free tier, use a managed database (Render Postgres has a free tier) and an external object storage service for uploads. citeturn1search5
+
+---
+
 ## How It Works - Step by Step
 
 ### 1. **User Registration**

@@ -1,7 +1,8 @@
 from pathlib import Path
 import os
-from app import app, Receipt, db, extract_fields, EASYOCR_OK
-from PIL import Image, ImageOps, ImageFilter
+import re
+from app import app, Receipt, db, extract_fields, _pick_total_from_text, _normalize_amount, EASYOCR_OK
+from PIL import Image
 import easyocr
 
 
@@ -68,56 +69,43 @@ def main():
                 r.raw_text = fields.get('raw_text')
                 changed = True
 
-            # vendor: prefer extracted, fallback to first OCR line
-            vendor_val = fields.get('vendor') or ''
-            if not vendor_val:
-                first_line = ''
-                for ln in use_text.splitlines():
-                    ln = ln.strip()
-                    if ln:
-                        first_line = ln
-                        break
-                vendor_val = first_line
-            if (r.vendor or '') != (vendor_val or ''):
-                r.vendor = vendor_val
-                changed = True
-
             # date: prefer extracted, fallback to more patterns
             date_val = fields.get('date') or ''
             if not date_val:
                 m = None
-                m = re.search(r"Date[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", use_text, flags=re.IGNORECASE)
+                m = re.search(r"Date[:\s]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", use_text, flags=re.IGNORECASE)
                 if m:
                     date_val = m.group(1)
+                else:
+                    lines = [ln.strip() for ln in use_text.splitlines()]
+                    for i, line in enumerate(lines):
+                        if not line:
+                            continue
+                        if re.search(r"\bdate\b", line, flags=re.IGNORECASE):
+                            m2 = re.search(r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", line)
+                            if m2:
+                                date_val = m2.group(1)
+                                break
+                            for j in range(i + 1, min(i + 4, len(lines))):
+                                nxt = lines[j]
+                                if not nxt:
+                                    continue
+                                m3 = re.search(r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", nxt)
+                                if m3:
+                                    date_val = m3.group(1)
+                                    break
+                            if date_val:
+                                break
             if (r.date or '') != (date_val or ''):
                 r.date = date_val
                 changed = True
 
             # total: prefer extracted, fallback to 'amount' or last decimal number
-            total_val = fields.get('total') or ''
-            if not total_val:
-                m = re.search(r"(?:total|amount due|amount|grand total)[:\s]*([0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})", use_text, flags=re.IGNORECASE)
-                if m:
-                    total_val = m.group(1)
-                else:
-                    m2 = re.findall(r"([0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})", use_text)
-                    if m2:
-                        total_val = max(m2, key=lambda s: len(s.replace(",", "")))
-            # normalize before saving
+            total_val = fields.get('total') or _pick_total_from_text(use_text) or ''
             if total_val:
-                total_val = total_val.replace(",", "")
+                total_val = _normalize_amount(total_val)
             if (r.total or '') != (total_val or ''):
                 r.total = total_val
-                changed = True
-
-            # currency and receipt number
-            currency_val = fields.get('currency') or ''
-            if (r.currency or '') != (currency_val or ''):
-                r.currency = currency_val
-                changed = True
-            receipt_val = fields.get('receipt_number') or ''
-            if (r.receipt_number or '') != (receipt_val or ''):
-                r.receipt_number = receipt_val
                 changed = True
             if changed:
                 updated += 1

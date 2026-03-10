@@ -25,7 +25,7 @@
     <tr><th>Date</th><td>{{ receipt.date }}</td></tr>
     <tr><th>Total</th><td>{{ receipt.total }}</td></tr>
     <tr><th>Category</th><td>{{ receipt.bill_category }}</td></tr>
-    <tr><th>Filename</th><td>{{ receipt.filename }}</td></tr>
+    <tr><th>Filename</th><td>{{ receipt.original_filename or (receipt.filename|display_filename) }}</td></tr>
     <tr><th>Uploaded</th><td>{{ receipt.created_at }}</td></tr>
   </table>
 

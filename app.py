@@ -1,6 +1,8 @@
 import os
 import re
 import csv
+import io
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from PIL import Image, ImageOps, ImageFilter
+from sqlalchemy import text as sql_text
 
 # EasyOCR-only setup
 try:
@@ -59,6 +62,7 @@ class Receipt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, nullable=False)
     filename = db.Column(db.String(300), nullable=False)
+    original_filename = db.Column(db.String(300))
     date = db.Column(db.String(50))
     total = db.Column(db.String(50))
     bill_category = db.Column(db.String(100))
@@ -68,6 +72,24 @@ class Receipt(db.Model):
 
 def init_db():
     db.create_all()
+    # lightweight migration: add original_filename column if missing
+    try:
+        cols = [row[1] for row in db.session.execute(sql_text("PRAGMA table_info(receipt)")).fetchall()]
+        if "original_filename" not in cols:
+            db.session.execute(sql_text("ALTER TABLE receipt ADD COLUMN original_filename VARCHAR(300)"))
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+    # backfill original_filename for existing receipts
+    with app.app_context():
+        updated = False
+        for r in Receipt.query.filter((Receipt.original_filename == None) | (Receipt.original_filename == "")).all():
+            r.original_filename = display_filename(r.filename)
+            updated = True
+        if updated:
+            db.session.commit()
+
     if not EASYOCR_OK:
         with app.app_context():
             updated = False
@@ -76,6 +98,10 @@ def init_db():
                 updated = True
             if updated:
                 db.session.commit()
+
+
+with app.app_context():
+    init_db()
 
 
 def current_user():
@@ -112,6 +138,17 @@ def display_date(value):
         return str(value)
 
 
+@app.template_filter('display_filename')
+def display_filename(value):
+    if not value:
+        return ""
+    # strip collision suffix like "-d81cea31" before extension
+    m = re.match(r"^(.*)-[0-9a-fA-F]{8}(\.[^.]+)$", value)
+    if m:
+        return f"{m.group(1)}{m.group(2)}"
+    return value
+
+
 def detect_bill_category(text: str) -> str:
     """Detect bill category from OCR text."""
     text_lower = text.lower()
@@ -135,36 +172,165 @@ def detect_bill_category(text: str) -> str:
     return "Other"
 
 
+def _normalize_amount(amount: str) -> str:
+    if not amount:
+        return ""
+    s = amount.strip()
+    # keep digits, dot, comma and minus
+    s = re.sub(r"[^0-9,.\-]", "", s)
+    # If there are commas but no dots, treat comma as decimal separator (e.g. "12,34")
+    if s.count(",") > 0 and s.count(".") == 0:
+        if s.count(",") > 1:
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")
+    return s
+
+
+def _pick_total_from_text(text: str) -> str:
+    if not text:
+        return ""
+
+    # normalize common OCR currency noise
+    text = text.replace("{", "₹").replace("}", "")
+
+    total_keywords = [
+        "total",
+        "grand total",
+        "amount due",
+        "balance due",
+        "payable",
+        "total due",
+    ]
+    exclude_keywords = [
+        "subtotal",
+        "sub total",
+        "sub-total",
+        "round off",
+        "rounding",
+        "discount",
+        "service charge",
+        "tip",
+        "change",
+        "cgst",
+        "sgst",
+        "gst",
+        "tax",
+    ]
+    amount_re = r"([0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})"
+    currency_re = r"([€£$₹]\s*[0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})"
+
+    # prefer numbers on lines that contain total keywords
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        line_l = line.lower()
+        line_l = line_l.replace("0", "o")
+        if any(k in line_l for k in total_keywords) and not any(x in line_l for x in exclude_keywords):
+            nums = re.findall(amount_re, line)
+            if nums:
+                def as_float(s: str) -> float:
+                    try:
+                        return float(_normalize_amount(s))
+                    except Exception:
+                        return 0.0
+                return _normalize_amount(max(nums, key=as_float))
+            # fallback to integer total on keyword lines (e.g. "TOTAL 1234")
+            ints = re.findall(r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{2,6})", line)
+            if ints:
+                return _normalize_amount(ints[-1])
+            # if total keyword is on its own line, look ahead for next numeric-only line
+            for j in range(i + 1, min(i + 3, len(lines))):
+                nxt = lines[j].strip()
+                if not nxt:
+                    continue
+                if any(c.isalpha() for c in nxt):
+                    continue
+                nums = re.findall(amount_re, nxt)
+                if nums:
+                    return _normalize_amount(nums[-1])
+                ints = re.findall(r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{2,6})", nxt)
+                if ints:
+                    return _normalize_amount(ints[-1])
+
+    # regex across text for total keywords near amounts
+    m2 = re.findall(
+        r"(?:total|grand total|amount due|balance due|payable|total due)[^0-9]{0,20}([0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m2:
+        def as_float(s: str) -> float:
+            try:
+                return float(_normalize_amount(s))
+            except Exception:
+                return 0.0
+        return _normalize_amount(max(m2, key=as_float))
+
+    # fallback: if currency symbol present, pick the largest value
+    m = re.findall(currency_re, text)
+    if m:
+        def as_float(s: str) -> float:
+            try:
+                return float(_normalize_amount(s))
+            except Exception:
+                return 0.0
+        return _normalize_amount(max(m, key=as_float))
+
+    # final fallback: choose the largest numeric value
+    nums = re.findall(amount_re, text)
+    if nums:
+        def as_float(s: str) -> float:
+            try:
+                return float(_normalize_amount(s))
+            except Exception:
+                return 0.0
+        return _normalize_amount(max(nums, key=as_float))
+
+    return ""
+
+
 def extract_fields(text: str):
     """Extract date, total, and bill_category from OCR text."""
     # date patterns
     date = ""
-    date_patterns = [r"\b(\d{4}-\d{2}-\d{2})\b", r"\b(\d{2}/\d{2}/\d{4})\b", r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b"]
+    date_patterns = [
+        r"\b(\d{4}-\d{2}-\d{2})\b",
+        r"\b(\d{2}/\d{2}/\d{4})\b",
+        r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b",
+        r"\b(\d{1,2}[.\-]\d{1,2}[.\-]\d{2,4})\b",
+        r"\b(\d{1,2}\s*[.\-]\s*\d{1,2}\s*[.\-]\s*\d{2,4})\b",
+    ]
     for p in date_patterns:
         m = re.search(p, text)
         if m:
             date = m.group(1)
             break
+    if not date:
+        # try "Date" label followed by date on same or next line
+        lines = [ln.strip() for ln in text.splitlines()]
+        for i, line in enumerate(lines):
+            if not line:
+                continue
+            if re.search(r"\bdate\b", line, flags=re.IGNORECASE):
+                m = re.search(r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", line)
+                if m:
+                    date = m.group(1)
+                    break
+                # look ahead for next non-empty line
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    nxt = lines[j]
+                    if not nxt:
+                        continue
+                    m2 = re.search(r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", nxt)
+                    if m2:
+                        date = m2.group(1)
+                        break
+                if date:
+                    break
 
-    # total amount (allow thousands separators like 1,234.56)
-    total = ""
-    m = re.search(r"([€£$]\s*[0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})", text)
-    if m:
-        total = m.group(1)
-    if not total:
-        # try common keywords
-        m = re.search(r"(?:total|amount due|amount)[:\s]*([0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})", text, flags=re.IGNORECASE)
-        if m:
-            total = m.group(1)
-    if not total:
-        # fallback: grab any decimal-like number, prefer the longest match (likely the total)
-        m2 = re.findall(r"([0-9]{1,3}(?:,[0-9]{3})*[.,][0-9]{2})", text)
-        if m2:
-            # choose the entry with the most digits (ignore commas) to avoid "1,13" over "9.00"
-            total = max(m2, key=lambda s: len(s.replace(",", "")))
-    # normalize by stripping commas so storage/display is consistent
-    if total:
-        total = total.replace(",", "")
+    total = _pick_total_from_text(text)
 
     bill_category = detect_bill_category(text)
 
@@ -174,6 +340,8 @@ def extract_fields(text: str):
 def ocr_path(path: Path) -> str:
     """OCR an image file using EasyOCR (images only). Returns extracted text."""
     if not path.exists():
+        return ""
+    if not EASYOCR_OK:
         return ""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -346,8 +514,14 @@ def upload():
         if not f:
             flash("No file uploaded", "error")
             return redirect(url_for("upload"))
-        filename = secure_filename(f.filename)
+        original_filename = secure_filename(f.filename)
+        filename = original_filename
         dest = Path(app.config["UPLOAD_FOLDER"]) / filename
+        if dest.exists():
+            stem = dest.stem
+            suffix = dest.suffix
+            filename = f"{stem}-{uuid.uuid4().hex[:8]}{suffix}"
+            dest = Path(app.config["UPLOAD_FOLDER"]) / filename
         f.save(dest)
 
         try:
@@ -372,6 +546,7 @@ def upload():
         receipt = Receipt(
             user_id=user.id,
             filename=filename,
+            original_filename=original_filename,
             date=fields.get("date"),
             total=fields.get("total"),
             bill_category=fields.get("bill_category"),
@@ -386,6 +561,12 @@ def upload():
 
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
+    user = current_user()
+    if not user:
+        return "Forbidden", 403
+    r = Receipt.query.filter_by(user_id=user.id, filename=filename).first()
+    if not r:
+        return "Forbidden", 403
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
@@ -431,33 +612,21 @@ def export():
         def parse_amount(s: str) -> float:
             if not s:
                 return 0.0
-            s = s.strip()
-            # keep digits, dot, comma and minus
-            s = re.sub(r"[^0-9,\.\-]", "", s)
-            # If there are commas but no dots, treat comma as decimal separator (e.g. "12,34")
-            if s.count(',') > 0 and s.count('.') == 0:
-                if s.count(',') > 1:
-                    s = s.replace(',', '')
-                else:
-                    s = s.replace(',', '.')
-            else:
-                s = s.replace(',', '')
             try:
-                return float(s)
+                return float(_normalize_amount(s))
             except Exception:
                 return 0.0
 
         total_sum = sum(parse_amount(r.total) for r in items)
 
         def stream_csv():
-            header = ",".join(["id", "date", "total", "bill_category", "filename", "created_at"]) + "\n"
-            yield header
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["id", "date", "total", "bill_category", "filename", "created_at"])
             for r in items:
-                row = [str(r.id), (r.date or ""), (r.total or ""), (r.bill_category or ""), (r.filename or ""), r.created_at.isoformat()]
-                yield ",".join([v.replace(",", " ") for v in row]) + "\n"
-            # Append a final total row summing all receipt totals
-            total_row = ["", "", f"{total_sum:.2f}", "TOTAL", "", ""]
-            yield ",".join([v.replace(",", " ") for v in total_row]) + "\n"
+                writer.writerow([r.id, (r.date or ""), (r.total or ""), (r.bill_category or ""), (r.filename or ""), r.created_at.isoformat()])
+            writer.writerow(["", "", f"{total_sum:.2f}", "TOTAL", "", ""])
+            yield output.getvalue()
 
         response = Response(stream_csv(), mimetype="text/csv")
         response.headers["Content-Disposition"] = "attachment; filename=receipts.csv"
@@ -556,6 +725,6 @@ class ResponseStream:
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_DEBUG") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)

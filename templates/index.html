@@ -95,7 +95,7 @@
           <td>{{ r.date|display_date }}</td>
           <td>{{ r.total }}</td>
           <td>{{ r.bill_category }}</td>
-          <td>{{ r.filename }}</td>
+          <td>{{ r.original_filename or (r.filename|display_filename) }}</td>
           <td>{{ r.created_at|display_date }}</td>
           <td class="actions-cell">
             <a href="{{ url_for('receipt_view', rid=r.id) }}" class="action-link">View</a>
