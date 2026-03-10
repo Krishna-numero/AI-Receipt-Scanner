@@ -48,7 +48,8 @@ app.config["UPLOAD_FOLDER"] = str(UPLOAD_FOLDER)
 db = SQLAlchemy(app)
 
 
-EASYOCR_OK = EASYOCR_AVAILABLE
+OCR_ENABLED = os.environ.get("OCR_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+EASYOCR_OK = EASYOCR_AVAILABLE and OCR_ENABLED
 EASYOCR_ERR = "EasyOCR not installed" if not EASYOCR_OK else ""
 
 
@@ -383,6 +384,8 @@ def ocr_path(path: Path) -> str:
 
 def reprocess_all_receipts():
     """Re-run OCR and extraction for all receipts."""
+    if not EASYOCR_OK:
+        return 0
     updated = 0
     search_dirs = [Path(app.config["UPLOAD_FOLDER"]), Path.home() / "Downloads", Path.home() / "Desktop", Path.home() / "Documents", Path.home() / "Pictures"]
     with app.app_context():
@@ -528,7 +531,10 @@ def upload():
 
         if not text.strip():
             if not EASYOCR_OK:
-                flash("No OCR engine available (EasyOCR). Install and restart.", "error")
+                if not OCR_ENABLED:
+                    flash("OCR is disabled on the server. Set OCR_ENABLED=1 to enable.", "warning")
+                else:
+                    flash("No OCR engine available (EasyOCR). Install and restart.", "error")
             else:
                 flash("OCR produced no text — try reprocessing or upload a clearer image.", "warning")
 
@@ -658,6 +664,9 @@ def reprocess_receipt(rid):
     user = current_user()
     if not user:
         return redirect(url_for('login'))
+    if not EASYOCR_OK:
+        flash("OCR is disabled on the server.", "warning")
+        return redirect(url_for('index'))
     r = Receipt.query.get_or_404(rid)
     if r.user_id != user.id:
         return "Forbidden", 403
