@@ -100,10 +100,6 @@ def init_db():
                 db.session.commit()
 
 
-with app.app_context():
-    init_db()
-
-
 def current_user():
     uid = session.get("user_id")
     if not uid:
@@ -722,6 +718,10 @@ def delete_receipt(rid):
 class ResponseStream:
     def write(self, data):
         return data
+
+
+with app.app_context():
+    init_db()
 
 
 if __name__ == "__main__":
